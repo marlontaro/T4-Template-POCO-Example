@@ -1,6 +1,231 @@
-﻿<#@ template debug="false" hostspecific="false" language="C#" #>
+﻿﻿<#@ template language="C#" hostspecific="true" debug="True" #>
 <#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Xml" #>
+<#@ assembly name="System.Configuration" #>
+<#@ assembly name="Microsoft.SqlServer.Smo" #>
+<#@ assembly name="Microsoft.SqlServer.ConnectionInfo" #>
+<#@ assembly name="Microsoft.SqlServer.Management.Sdk.Sfc" #>
+
+<#@ import namespace="System" #>
+<#@ import namespace="System.IO" #>
 <#@ import namespace="System.Linq" #>
 <#@ import namespace="System.Text" #>
-<#@ import namespace="System.Collections.Generic" #>
-<#@ output extension=".txt" #>
+<#@ import namespace="Microsoft.SqlServer.Management.Smo" #>
+ 
+<#@ import namespace="Microsoft.VisualStudio.TextTemplating" #>
+<#@ import namespace="System.Configuration" #>
+<#
+
+    var configurationFileMap = new ExeConfigurationFileMap();
+    configurationFileMap.ExeConfigFilename = this.Host.ResolvePath("App.config");
+    var config = ConfigurationManager.OpenMappedExeConfiguration(configurationFileMap, ConfigurationUserLevel.None);
+
+    //**********************************************************************************************
+    // This T4 generates POCOs from the specified DB and saves them to the specified folder which 
+    // is relative to the template's location. One file per table/POCO.
+    //**********************************************************************************************
+    //****************************
+    // DEFINE YOUR VARIABLES HERE
+    //****************************
+    // The SQL server name or IP
+    string sqlServer = config.AppSettings.Settings["sqlServer"].Value;
+    // The SQL username
+    string sqlLogin = config.AppSettings.Settings["sqlLogin"].Value;
+    // The SQL password
+    string sqlPassword = config.AppSettings.Settings["sqlPassword"].Value;
+    // The SQL database to generate the POCOs for
+    string sqlDatabase = config.AppSettings.Settings["sqlDatabase"].Value;
+    // The namespace to apply to the generated classes
+    string classNamespace = config.AppSettings.Settings["classNamespace"].Value;
+    // The destination folder for the generated classes, relative to this file's location.
+    string destinationFolder = config.AppSettings.Settings["destinationFolder"].Value;
+    // Loop over each table and create a class file!
+    Server server = new Server(sqlServer);
+    server.ConnectionContext.LoginSecure = false;
+    server.ConnectionContext.Login = sqlLogin;
+    server.ConnectionContext.Password = sqlPassword;
+    server.ConnectionContext.Connect();
+    foreach (Table table in server.Databases[sqlDatabase].Tables)
+    {
+        // Skip sys tables
+        if (table.Name.StartsWith("sys"))
+        {
+            continue;
+        }
+
+		string nombreTabla="["+ table.Schema +"].["+table.Name+"]";
+
+		String usingInheritance="";		
+		String nameInheritance="";
+		//search PK
+		String namePK="";
+		bool isEstado=false;
+		bool isEliminado=false;
+		foreach (Column col in table.Columns)
+        {
+			if(col.InPrimaryKey){
+				namePK=col.Name;
+				continue;
+			}
+
+			if(col.Name.Equals("Estado") ){
+				isEstado=true;
+				usingInheritance="using "+classNamespace+".Core;";
+			}
+
+			if(col.Name.Equals("Eliminado")){
+				isEliminado=true;
+				usingInheritance="using "+classNamespace+".Core;";
+			}
+		}
+
+		
+
+		if(isEstado && isEliminado){
+			nameInheritance=" : Base";
+		}else{
+			if(isEliminado){
+				nameInheritance=" : BaseSoloEliminado";
+			}
+		}
+
+		String nameSchema="";
+		if(!table.Schema.Equals("dbo")){
+			nameSchema = "."+table.Schema;
+		}
+
+
+
+#>
+using System;
+using NPoco;
+<#= usingInheritance #>
+
+namespace <#= classNamespace #><#= nameSchema #>
+{
+    /// <summary>
+    /// Represents a <#= table.Name #>.
+    /// NOTE: This class is generated from a T4 template - you should not modify it manually.
+    /// </summary>
+	[PrimaryKey("<#= namePK #>")]
+	[TableName("<#= nombreTabla #>")]
+    public class <#= table.Name #><#= nameInheritance #> 
+    {
+<# 
+        // Keep count so we don't whitespace the last property/column
+        int columnCount = table.Columns.Count;
+        int i = 0;
+        // Iterate all columns
+        foreach (Column col in table.Columns)
+        {
+            i++;
+            string propertyType = GetNetDataType(col.DataType.Name);
+            // If we can't map it, skip it
+            if (string.IsNullOrWhiteSpace(propertyType))
+            {
+                // Skip
+                continue;
+            }
+            // Handle nullable columns by making the type nullable
+            if (col.Nullable && propertyType != "string")
+            {
+                propertyType += "?";
+            }		
+
+			String nameColumn="Id";
+			String nameColumnNPoco=col.Name;
+
+			if(!col.InPrimaryKey){
+				nameColumn=FirstCharToUpper(col.Name);
+			}
+			
+			if(! ( col.Name.Equals("Estado") || col.Name.Equals("Eliminado")  )){
+				 
+			
+#>
+		[Column("<#= nameColumnNPoco #>")]
+        public <#= propertyType #> <#= nameColumn #> { get; set; }
+
+<#
+			}
+            // Do we insert the space?
+            if (i != columnCount)
+            {
+#>
+<#
+            }
+#>
+<#
+        }
+#>
+    }
+}      
+<#
+        // Write new POCO class to its own file
+        SaveOutput(table.Name + ".cs", destinationFolder+"/"+table.Schema);
+    } 
+#>
+<#+
+    public static string GetNetDataType(string sqlDataTypeName)
+    {
+        switch (sqlDataTypeName.ToLower())
+        {
+            case "bigint":
+                return "Int64";
+            case "binary":
+            case "image":
+            case "varbinary":
+                return "byte[]";
+            case "bit":
+                return "bool";
+            case "char":
+                return "char";
+            case "datetime":
+            case "smalldatetime":
+                return "DateTime";
+            case "decimal":
+            case "money":
+            case "numeric":
+                return "decimal";
+            case "float":
+                return "double";
+            case "int":
+                return "int";
+            case "nchar":
+            case "nvarchar":
+            case "text":
+            case "varchar":
+            case "xml":
+                return "string";
+            case "real":
+                return "single";
+            case "smallint":
+                return "Int16";
+            case "tinyint":
+                return "byte";
+            case "uniqueidentifier":
+                return "Guid";
+            default:
+                return null;
+        }
+    }
+
+	public static string FirstCharToUpper(string input)
+	{
+		if (String.IsNullOrEmpty(input))
+			throw new ArgumentException("ARGH!");
+		return input.First().ToString().ToUpper() + input.Substring(1);
+	}
+
+    void SaveOutput(string outputFileName, string destinationFolder)
+    {
+        // Write to destination folder
+        string templateDirectory = Path.Combine(Path.GetDirectoryName(Host.TemplateFile), destinationFolder);
+        string outputFilePath = Path.Combine(templateDirectory, outputFileName);
+        File.Delete(outputFilePath);
+        File.WriteAllText(outputFilePath, this.GenerationEnvironment.ToString()); 
+        // Flush generation
+        this.GenerationEnvironment.Remove(0, this.GenerationEnvironment.Length);
+    }
+#>
